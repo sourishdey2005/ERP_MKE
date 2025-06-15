@@ -1,0 +1,494 @@
+import streamlit as st
+import pandas as pd
+import hashlib
+import os
+import datetime
+import matplotlib.pyplot as plt
+import altair as alt
+
+# --- Page Config ---
+st.set_page_config(page_title="ERP System", layout="wide")
+
+# --- Directory Setup ---
+DATA_DIR = "erp_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# --- Global Files ---
+USER_FILE = os.path.join(DATA_DIR, "users.csv")
+INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.csv")
+SALES_FILE = os.path.join(DATA_DIR, "sales.csv")
+PURCHASE_FILE = os.path.join(DATA_DIR, "purchases.csv")
+EMPLOYEE_FILE = os.path.join(DATA_DIR, "employees.csv")
+ACCOUNTING_FILE = os.path.join(DATA_DIR, "accounting.csv")
+BANK_FILE = os.path.join(DATA_DIR, "banking.csv")
+
+# --- Utility: Password Hashing ---
+def hash_password(password):
+    """Hashes the password using SHA256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(input_password, stored_hash):
+    """Verifies the input password against the stored hash."""
+    return hash_password(input_password) == stored_hash
+
+# --- Load or Initialize CSV Files ---
+def load_csv(file_path, columns):
+    """Loads a CSV file or creates it with specified columns if it doesn't exist."""
+    if not os.path.exists(file_path):
+        pd.DataFrame(columns=columns).to_csv(file_path, index=False)
+    return pd.read_csv(file_path, dtype={col: 'object' for col in columns}) # Read all as objects to avoid type errors
+
+def save_csv(df, file_path):
+    """Saves a DataFrame to a CSV file."""
+    df.to_csv(file_path, index=False)
+
+# --- Load All Datasets on Startup ---
+users_df = load_csv(USER_FILE, ["username", "password"])
+inventory_df = load_csv(INVENTORY_FILE, ["id", "name", "category", "stock", "price", "updated"])
+sales_df = load_csv(SALES_FILE, ["invoice_id", "customer", "product", "qty", "total", "date"])
+purchase_df = load_csv(PURCHASE_FILE, ["supplier", "product", "qty", "cost", "date"])
+employee_df = load_csv(EMPLOYEE_FILE, ["emp_id", "name", "role", "salary", "join_date"])
+# Corrected Accounting columns to include category
+accounting_df = load_csv(ACCOUNTING_FILE, ["entry_id", "date", "type", "category", "amount", "note"])
+bank_df = load_csv(BANK_FILE, ["tx_id", "date", "type", "amount", "description"])
+
+# --- Convert appropriate columns to numeric for calculations ---
+def convert_df_types(df):
+    for col in ["stock", "price", "qty", "total", "cost", "salary", "amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    return df
+
+inventory_df = convert_df_types(inventory_df)
+sales_df = convert_df_types(sales_df)
+purchase_df = convert_df_types(purchase_df)
+employee_df = convert_df_types(employee_df)
+accounting_df = convert_df_types(accounting_df)
+bank_df = convert_df_types(bank_df)
+
+
+# ========== AUTHENTICATION UI ==========
+def auth_ui():
+    """Handles the login and registration UI."""
+    st.title("🔐 ERP Login / Register")
+
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+
+    tab1, tab2 = st.tabs(["🔑 Login", "📝 Register"])
+
+    with tab1:
+        uname = st.text_input("Username", key="login_user")
+        pword = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login"):
+            # Reload users_df to get the latest registered users
+            users_df = load_csv(USER_FILE, ["username", "password"])
+            user_record = users_df[users_df['username'] == uname]
+            if not user_record.empty and verify_password(pword, user_record.iloc[0]['password']):
+                st.session_state.logged_in = True
+                st.session_state.username = uname
+                st.success(f"Welcome, {uname}!")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    with tab2:
+        new_user = st.text_input("New Username", key="reg_user")
+        new_pass = st.text_input("New Password", type="password", key="reg_pass")
+        if st.button("Register"):
+            # Reload users_df to check for existing username
+            users_df = load_csv(USER_FILE, ["username", "password"])
+            if new_user in users_df['username'].values:
+                st.warning("Username already exists. Please choose another one.")
+            elif not new_user or not new_pass:
+                st.warning("Username and password cannot be empty.")
+            else:
+                hashed = hash_password(new_pass)
+                new_user_df = pd.DataFrame([[new_user, hashed]], columns=["username", "password"])
+                updated_users_df = pd.concat([users_df, new_user_df], ignore_index=True)
+                save_csv(updated_users_df, USER_FILE)
+                st.success("Registered successfully! Please login.")
+
+
+# ========== ERP MODULES ==========
+
+def dashboard_module():
+    st.title("📊 Dashboard Overview")
+    col1, col2, col3, col4 = st.columns(4)
+
+    total_sales = sales_df['total'].sum()
+    total_purchases = purchase_df['cost'].sum()
+    
+    # Calculate Net Profit from accounting
+    income = accounting_df[accounting_df['type'] == 'Income']['amount'].sum()
+    expense = accounting_df[accounting_df['type'] == 'Expense']['amount'].sum()
+    net_profit = income - expense
+
+    col1.metric("🛒 Total Sales", f"Rs{total_sales:,.2f}")
+    col2.metric("📥 Total Purchases", f"Rs{total_purchases:,.2f}")
+    col3.metric("💰 Net Profit (from Accounting)", f"Rs{net_profit:,.2f}")
+    col4.metric("👥 Total Employees", f"{len(employee_df)}")
+
+
+    st.markdown("---")
+    
+    # Sales bar chart (corrected with aggregation)
+    if not sales_df.empty:
+        st.subheader("Sales by Product")
+        chart = alt.Chart(sales_df).mark_bar().encode(
+            x=alt.X('product:N', title='Product'),
+            y=alt.Y('sum(total):Q', title='Total Sales (Rs)'),
+            color=alt.Color('product:N', legend=alt.Legend(title="Products")),
+            tooltip=['product', 'sum(qty)', 'sum(total)']
+        ).properties(
+            width='container'
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    # Pie chart: Income vs Expense
+    if not accounting_df.empty and (income > 0 or expense > 0):
+        st.subheader("Income vs Expense Distribution")
+        fig, ax = plt.subplots()
+        ax.pie([income, expense], labels=["Income", "Expense"], autopct='%1.1f%%',
+               colors=['#4CAF50', '#F44336'], startangle=90)
+        ax.axis('equal') # Equal aspect ratio ensures that pie is drawn as a circle.
+        st.pyplot(fig)
+
+
+def inventory_module():
+    global inventory_df
+    st.title("📦 Inventory Management")
+
+    with st.expander("➕ Add New Product"):
+        with st.form("add_product_form", clear_on_submit=True):
+            pid = st.text_input("Product ID")
+            name = st.text_input("Product Name")
+            cat = st.text_input("Category")
+            stock = st.number_input("Stock Quantity", min_value=0, step=1)
+            price = st.number_input("Unit Price", min_value=0.0, format="%.2f")
+            submitted = st.form_submit_button("Add Product")
+            if submitted:
+                if pid in inventory_df['id'].values:
+                    st.warning("Product ID already exists.")
+                elif not all([pid, name, cat]):
+                    st.warning("Product ID, Name, and Category are required.")
+                else:
+                    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    new_product = pd.DataFrame(
+                        [[pid, name, cat, stock, price, now]], columns=inventory_df.columns
+                    )
+                    inventory_df = pd.concat([inventory_df, new_product], ignore_index=True)
+                    save_csv(inventory_df, INVENTORY_FILE)
+                    st.success(f"Product '{name}' added successfully.")
+
+    st.markdown("---")
+    st.subheader("📄 Product List")
+    
+    # Low stock alert
+    low_stock_level = st.slider("🔔 Show low stock alerts (items with stock <=)", 0, 100, 10)
+    low_stock_df = inventory_df[inventory_df["stock"] <= low_stock_level]
+    if not low_stock_df.empty:
+        st.warning(f"⚠ {len(low_stock_df)} products with low stock:", icon="⚠️")
+        st.dataframe(low_stock_df)
+
+    st.markdown("### 📋 Full Inventory Table & Management")
+    st.dataframe(inventory_df, use_container_width=True)
+
+    # Edit/Delete form
+    if not inventory_df.empty:
+        st.markdown("#### ✏️ Update or Delete a Product")
+        select_options = inventory_df['name'].unique()
+        selected_product_name = st.selectbox("Select a product to manage", options=select_options)
+        
+        if selected_product_name:
+            product_index = inventory_df[inventory_df["name"] == selected_product_name].index[0]
+            product_data = inventory_df.iloc[product_index]
+
+            with st.form(f"edit_{product_data['id']}"):
+                st.write(f"Editing: **{product_data['name']}** (ID: {product_data['id']})")
+                new_stock = st.number_input("Update Stock", min_value=0, value=int(product_data["stock"]))
+                new_price = st.number_input("Update Price", min_value=0.0, value=float(product_data["price"]), format="%.2f")
+                
+                col_update, col_delete = st.columns(2)
+                with col_update:
+                    if st.form_submit_button("✅ Update", use_container_width=True):
+                        inventory_df.loc[product_index, "stock"] = new_stock
+                        inventory_df.loc[product_index, "price"] = new_price
+                        inventory_df.loc[product_index, "updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        save_csv(inventory_df, INVENTORY_FILE)
+                        st.success(f"Updated '{selected_product_name}'.")
+                        st.rerun()
+
+                with col_delete:
+                     if st.form_submit_button("❌ Delete", use_container_width=True):
+                        inventory_df = inventory_df.drop(product_index).reset_index(drop=True)
+                        save_csv(inventory_df, INVENTORY_FILE)
+                        st.warning(f"Deleted '{selected_product_name}'.")
+                        st.rerun()
+
+
+def sales_module():
+    global sales_df, inventory_df
+    st.title("🛒 Sales Management")
+
+    with st.expander("➕ Create New Sale"):
+        with st.form("sales_form", clear_on_submit=True):
+            if inventory_df.empty:
+                st.warning("No products in inventory to sell.")
+                st.stop()
+
+            invoice_id = f"INV{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+            customer = st.text_input("Customer Name")
+            product_name = st.selectbox("Select Product", inventory_df["name"].unique())
+            
+            # Check stock for the selected product
+            available_stock = inventory_df.loc[inventory_df["name"] == product_name, "stock"].values[0]
+            
+            qty = st.number_input("Quantity", min_value=1, max_value=int(available_stock), step=1)
+            
+            unit_price = inventory_df.loc[inventory_df["name"] == product_name, "price"].values[0]
+            total = unit_price * qty
+            
+            st.info(f"Available Stock: {available_stock} units. Total Price: Rs{total:,.2f}", icon="💰")
+
+            submit = st.form_submit_button("Record Sale")
+            if submit:
+                if not customer.strip():
+                    st.warning("Customer name cannot be empty.")
+                else:
+                    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    new_sale = pd.DataFrame([[invoice_id, customer, product_name, qty, total, date_str]], columns=sales_df.columns)
+                    sales_df = pd.concat([sales_df, new_sale], ignore_index=True)
+                    save_csv(sales_df, SALES_FILE)
+
+                    inventory_df.loc[inventory_df["name"] == product_name, "stock"] -= qty
+                    save_csv(inventory_df, INVENTORY_FILE)
+
+                    st.success(f"Sale recorded! Invoice ID: {invoice_id}")
+
+    st.markdown("---")
+    st.subheader("📄 Sales Records")
+    st.dataframe(sales_df.sort_values("date", ascending=False), use_container_width=True)
+    st.download_button("📥 Download Sales CSV", sales_df.to_csv(index=False), "sales_data.csv")
+
+def purchase_module():
+    global purchase_df, inventory_df
+    st.title("📥 Purchase Management")
+
+    with st.expander("➕ Record New Purchase"):
+        with st.form("purchase_form", clear_on_submit=True):
+            if inventory_df.empty:
+                st.warning("Cannot record purchase. Add products to inventory first.")
+                st.stop()
+                
+            supplier = st.text_input("Supplier Name")
+            product_name = st.selectbox("Select Product", inventory_df["name"].unique())
+            qty = st.number_input("Quantity Purchased", min_value=1, step=1)
+            cost = st.number_input("Total Cost", min_value=0.0, format="%.2f")
+
+            submit = st.form_submit_button("Record Purchase")
+            if submit:
+                if not supplier.strip():
+                    st.warning("Supplier name is required.")
+                else:
+                    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    new_purchase = pd.DataFrame([[supplier, product_name, qty, cost, date_str]], columns=purchase_df.columns)
+                    purchase_df = pd.concat([purchase_df, new_purchase], ignore_index=True)
+                    save_csv(purchase_df, PURCHASE_FILE)
+                    
+                    inventory_df.loc[inventory_df["name"] == product_name, "stock"] += qty
+                    inventory_df.loc[inventory_df["name"] == product_name, "updated"] = date_str
+                    save_csv(inventory_df, INVENTORY_FILE)
+                    
+                    st.success("Purchase recorded and stock updated.")
+    
+    st.markdown("---")
+    st.subheader("📄 Purchase History")
+    st.dataframe(purchase_df.sort_values("date", ascending=False), use_container_width=True)
+    st.download_button("📥 Download Purchase CSV", purchase_df.to_csv(index=False), "purchase_data.csv")
+
+
+def hr_module():
+    global employee_df
+    st.title("👨‍💼 Human Resources Management")
+
+    with st.expander("➕ Add New Employee"):
+        with st.form("add_employee_form", clear_on_submit=True):
+            emp_id = st.text_input("Employee ID")
+            name = st.text_input("Full Name")
+            role = st.text_input("Designation / Role")
+            salary = st.number_input("Monthly Salary", min_value=0.0, format="%.2f")
+            join_date = st.date_input("Joining Date", value=datetime.date.today())
+            
+            submit = st.form_submit_button("Add Employee")
+            if submit:
+                if emp_id in employee_df["emp_id"].values:
+                    st.warning("Employee ID already exists.")
+                elif not all([emp_id, name, role]):
+                    st.warning("Employee ID, Name, and Role are required.")
+                else:
+                    new_emp = pd.DataFrame([[emp_id, name, role, salary, str(join_date)]], columns=employee_df.columns)
+                    employee_df = pd.concat([employee_df, new_emp], ignore_index=True)
+                    save_csv(employee_df, EMPLOYEE_FILE)
+                    st.success("Employee added successfully.")
+
+    st.markdown("---")
+    st.subheader("📄 Employee Records")
+    st.dataframe(employee_df, use_container_width=True)
+    
+    total_salary = employee_df["salary"].sum()
+    st.metric("💸 Total Monthly Salary Expense", f"Rs{total_salary:,.2f}")
+    
+    st.download_button("📥 Download Employee Data", employee_df.to_csv(index=False), "employees.csv")
+
+
+def accounting_module():
+    global accounting_df
+    st.title("💼 Accounting & Finance")
+
+    with st.expander("➕ Add Manual Financial Entry"):
+        with st.form("accounting_form", clear_on_submit=True):
+            entry_type = st.radio("Entry Type", ["Income", "Expense"])
+            category = st.text_input("Category (e.g., Rent, Utilities, Investment)")
+            amount = st.number_input("Amount", min_value=0.01, format="%.2f")
+            note = st.text_area("Note / Description (Optional)")
+            date = st.date_input("Date", value=datetime.date.today())
+            submit = st.form_submit_button("Add Entry")
+            if submit:
+                if not category:
+                    st.warning("Category is a required field.")
+                else:
+                    entry_id = f"MAN{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    new_entry = pd.DataFrame([[entry_id, str(date), entry_type, category, amount, note]], columns=accounting_df.columns)
+                    accounting_df = pd.concat([accounting_df, new_entry], ignore_index=True)
+                    save_csv(accounting_df, ACCOUNTING_FILE)
+                    st.success("Accounting entry added.")
+    
+    with st.expander("⚙️ Sync Data from Other Modules"):
+        st.info("This will import sales, purchases, and salaries as accounting entries. Duplicates are ignored.", icon="ℹ️")
+        if st.button("🔁 Sync Now", type="primary"):
+            new_entries = []
+            existing_notes = set(accounting_df['note'])
+            
+            # Import sales
+            for _, row in sales_df.iterrows():
+                note = f"Sale - Invoice: {row['invoice_id']}"
+                if note not in existing_notes:
+                    new_entries.append({'entry_id': row['invoice_id'], 'date': row['date'].split(' ')[0], 'type': 'Income', 'category': 'Product Sale', 'amount': row['total'], 'note': note})
+
+            # Import purchases
+            for _, row in purchase_df.iterrows():
+                note = f"Purchase - Supplier: {row['supplier']}, Product: {row['product']}"
+                if note not in existing_notes:
+                     new_entries.append({'entry_id': f"PUR{row['date']}{row['supplier']}", 'date': row['date'].split(' ')[0], 'type': 'Expense', 'category': 'Cost of Goods', 'amount': row['cost'], 'note': note})
+
+            # Import salaries for current month
+            today = datetime.date.today()
+            salary_date = today.strftime("%Y-%m-%d")
+            for _, row in employee_df.iterrows():
+                note = f"Salary - {row['name']} ({row['emp_id']}) for {today.strftime('%B %Y')}"
+                if note not in existing_notes:
+                    new_entries.append({'entry_id': f"SAL{row['emp_id']}{today.strftime('%Y%m')}", 'date': salary_date, 'type': 'Expense', 'category': 'Salary', 'amount': row['salary'], 'note': note})
+
+            if new_entries:
+                new_entries_df = pd.DataFrame(new_entries)
+                accounting_df = pd.concat([accounting_df, new_entries_df], ignore_index=True)
+                save_csv(accounting_df, ACCOUNTING_FILE)
+                st.success(f"{len(new_entries)} new entries synced from other modules.")
+            else:
+                st.info("No new entries to sync.")
+
+
+    st.markdown("---")
+    st.subheader("📊 Financial Summary")
+    income = accounting_df[accounting_df["type"] == "Income"]["amount"].sum()
+    expense = accounting_df[accounting_df["type"] == "Expense"]["amount"].sum()
+    net = income - expense
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💰 Total Income", f"Rs{income:,.2f}")
+    col2.metric("💸 Total Expenses", f"Rs{expense:,.2f}")
+    col3.metric("📈 Net Profit/Loss", f"Rs{net:,.2f}", delta_color=("inverse" if net < 0 else "normal"))
+
+    st.subheader("📄 Transaction Log")
+    st.dataframe(accounting_df.sort_values("date", ascending=False), use_container_width=True)
+    st.download_button("📥 Download Accounting CSV", accounting_df.to_csv(index=False), "accounts.csv")
+
+def banking_module():
+    global bank_df
+    st.title("🏦 Banking System")
+
+    with st.expander("➕ Add New Bank Transaction"):
+        with st.form("bank_form", clear_on_submit=True):
+            date = st.date_input("Date", value=datetime.date.today())
+            tx_type = st.radio("Transaction Type", ["Deposit", "Withdrawal"])
+            amount = st.number_input("Amount", min_value=0.01, format="%.2f")
+            desc = st.text_input("Description (e.g., source, reason)")
+            submit = st.form_submit_button("Add Transaction")
+
+            if submit:
+                if not desc:
+                    st.warning("Description is required.")
+                else:
+                    tx_id = f"TXN{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    new_tx = pd.DataFrame([[tx_id, str(date), tx_type, amount, desc]], columns=bank_df.columns)
+                    bank_df = pd.concat([bank_df, new_tx], ignore_index=True)
+                    save_csv(bank_df, BANK_FILE)
+                    st.success("Bank transaction recorded successfully.")
+    
+    st.markdown("---")
+    deposits = bank_df.loc[bank_df['type'] == 'Deposit', 'amount'].sum()
+    withdrawals = bank_df.loc[bank_df['type'] == 'Withdrawal', 'amount'].sum()
+    balance = deposits - withdrawals
+
+    st.metric("🏦 Current Bank Balance", f"Rs{balance:,.2f}")
+
+    st.subheader("📄 Bank Transaction History")
+    st.dataframe(bank_df.sort_values("date", ascending=False), use_container_width=True)
+    st.download_button("📥 Download Transactions CSV", bank_df.to_csv(index=False), "bank_transactions.csv")
+
+
+# ========== MAIN APP LOGIC ==========
+def main():
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+
+    if not st.session_state.logged_in:
+        auth_ui()
+    else:
+        st.sidebar.title(f"Welcome, {st.session_state.username}")
+        st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1063/1063412.png", width=100)
+        
+        menu = st.sidebar.radio("🧭 Navigation Menu", [
+            "📊 Dashboard",
+            "📦 Inventory",
+            "🛒 Sales",
+            "📥 Purchases",
+            "👨‍💼 HR",
+            "💼 Accounting",
+            "🏦 Banking"
+        ])
+        
+        st.sidebar.markdown("---")
+        if st.sidebar.button("Logout"):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.rerun()
+            
+        if menu == "📊 Dashboard":
+            dashboard_module()
+        elif menu == "📦 Inventory":
+            inventory_module()
+        elif menu == "🛒 Sales":
+            sales_module()
+        elif menu == "📥 Purchases":
+            purchase_module()
+        elif menu == "👨‍💼 HR":
+            hr_module()
+        elif menu == "💼 Accounting":
+            accounting_module()
+        elif menu == "🏦 Banking":
+            banking_module()
+
+if __name__ == "__main__":
+    main()
