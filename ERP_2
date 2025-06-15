@@ -1,0 +1,604 @@
+# ==============================================================================
+# PRO-ERP SUITE: AN ADVANCED STREAMLIT-BASED ERP APPLICATION
+# Author: Your Name/Model
+# Version: 3.1 (Robust Edition)
+#
+# This script demonstrates a complex, multi-module Enterprise Resource Planning
+# system built with Streamlit. It includes advanced features like PDF reporting,
+# task management, audit logging, and role-based access control.
+# FIX: Added robustness for missing logo file and updated deprecated parameters.
+# ==============================================================================
+
+# --- Core Libraries ---
+import streamlit as st
+import pandas as pd
+import hashlib
+import os
+import datetime
+import json
+import base64
+
+# --- Visualization & Reporting Libraries ---
+import matplotlib.pyplot as plt
+import altair as alt
+from fpdf import FPDF
+
+# ==============================================================================
+# 1. APPLICATION CONFIGURATION & SETUP
+# ==============================================================================
+
+# --- Page Configuration ---
+# Must be the first Streamlit command.
+st.set_page_config(
+    page_title="Pro-ERP Suite",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'mailto:help@example.com',
+        'Report a bug': "mailto:bugs@example.com",
+        'About': "# This is the Pro-ERP Suite. An advanced business management tool."
+    }
+)
+
+# --- Directory & File Paths Setup ---
+DATA_DIR = "erp_data_pro"
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+
+# Define file paths for all data modules
+USER_FILE = os.path.join(DATA_DIR, "users.csv")
+INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.csv")
+SALES_FILE = os.path.join(DATA_DIR, "sales.csv")
+PURCHASE_FILE = os.path.join(DATA_DIR, "purchases.csv")
+EMPLOYEE_FILE = os.path.join(DATA_DIR, "employees.csv")
+ACCOUNTING_FILE = os.path.join(DATA_DIR, "accounting.csv")
+BANK_FILE = os.path.join(DATA_DIR, "banking.csv")
+CUSTOMER_FILE = os.path.join(DATA_DIR, "customers.csv")
+SUPPLIER_FILE = os.path.join(DATA_DIR, "suppliers.csv")
+TASK_FILE = os.path.join(DATA_DIR, "tasks.csv")
+AUDIT_LOG_FILE = os.path.join(DATA_DIR, "audit_log.csv")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+LOGO_PATH = "E:\Project\your_project_folder\WhatsApp Image 2025-06-12 at 10.01.32_81af5efb.jpg"
+
+# ==============================================================================
+# 2. CORE UTILITIES & HELPER FUNCTIONS
+# ==============================================================================
+
+# --- Enhanced Security: Password Hashing with Salt ---
+def hash_password(password):
+    """Hashes a password with a randomly generated salt using PBKDF2."""
+    salt = os.urandom(16)
+    pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return salt.hex() + ':' + pwd_hash.hex()
+
+def verify_password(stored_password_with_salt, provided_password):
+    """Verifies a stored password against one provided by the user."""
+    try:
+        salt_hex, stored_hash_hex = stored_password_with_salt.split(':')
+        salt = bytes.fromhex(salt_hex)
+        stored_hash = bytes.fromhex(stored_hash_hex)
+        provided_hash = hashlib.pbkdf2_hmac('sha256', provided_password.encode('utf-8'), salt, 100000)
+        return provided_hash == stored_hash
+    except (ValueError, TypeError, AttributeError):
+        # Handle cases where the stored password format is incorrect or None
+        return False
+
+# --- Data Loading and Initialization ---
+def load_or_create_csv(file_path, columns):
+    """
+    Loads a CSV file from the specified path. If the file doesn't exist,
+    it creates one with the given columns.
+    It includes special handling to create a default admin user on first run.
+    """
+    if not os.path.exists(file_path):
+        df = pd.DataFrame(columns=columns)
+        if 'role' in columns and file_path == USER_FILE:
+            # Create a default admin user for the first-time setup
+            admin_password = hash_password("admin123")
+            df.loc[0] = ["admin", admin_password, "admin"]
+        df.to_csv(file_path, index=False)
+    # Read all data as strings to prevent automatic type casting issues
+    return pd.read_csv(file_path, dtype=str)
+
+def save_csv(df, file_path):
+    """Saves a pandas DataFrame to a CSV file."""
+    df.to_csv(file_path, index=False)
+
+# --- Settings Management ---
+def load_settings():
+    """Loads application settings from a JSON file."""
+    default_settings = {
+        "company_name": "Pro-ERP Inc.",
+        "low_stock_threshold": 20,
+        "currency_symbol": "$"
+    }
+    if not os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(default_settings, f)
+        return default_settings
+    else:
+        with open(SETTINGS_FILE, 'r') as f:
+            # Handle potential empty file error
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return default_settings
+
+def save_settings(settings_dict):
+    """Saves the settings dictionary to the JSON file."""
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings_dict, f, indent=4)
+
+# --- Audit Logging ---
+def log_activity(username, action, details=""):
+    """Logs a user's activity to the audit trail CSV file."""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = pd.DataFrame([[now, username, action, details]],
+                             columns=["timestamp", "username", "action", "details"])
+    
+    # Load existing log and append to prevent overwriting
+    if os.path.exists(AUDIT_LOG_FILE):
+        audit_df = pd.read_csv(AUDIT_LOG_FILE)
+        updated_audit_df = pd.concat([audit_df, log_entry], ignore_index=True)
+    else:
+        updated_audit_df = log_entry
+
+    save_csv(updated_audit_df, AUDIT_LOG_FILE)
+
+
+# --- Global DataFrames and Settings Loading ---
+APP_SETTINGS = load_settings()
+
+# Define all column structures for data integrity
+# This is crucial for creating files correctly if they don't exist
+COLUMN_DEFINITIONS = {
+    USER_FILE: ["username", "password", "role"],
+    INVENTORY_FILE: ["id", "name", "category", "stock", "price", "updated", "reorder_level"],
+    SALES_FILE: ["invoice_id", "customer_id", "product", "qty", "total", "date"],
+    PURCHASE_FILE: ["po_id", "supplier_id", "product", "qty", "cost", "date", "status"],
+    EMPLOYEE_FILE: ["emp_id", "name", "role", "salary", "join_date", "status"],
+    ACCOUNTING_FILE: ["entry_id", "date", "type", "category", "amount", "note"],
+    BANK_FILE: ["tx_id", "date", "type", "amount", "description", "reference"],
+    CUSTOMER_FILE: ["customer_id", "name", "email", "phone", "first_contact"],
+    SUPPLIER_FILE: ["supplier_id", "name", "contact_person", "email", "category"],
+    TASK_FILE: ["task_id", "title", "assigned_to", "status", "created_date", "due_date"],
+    AUDIT_LOG_FILE: ["timestamp", "username", "action", "details"]
+}
+
+# Load all datasets using a loop for cleanliness
+data_frames = {path: load_or_create_csv(path, cols) for path, cols in COLUMN_DEFINITIONS.items()}
+
+# Function to safely convert numeric columns after loading
+def safe_convert_to_numeric(series):
+    return pd.to_numeric(series, errors='coerce').fillna(0)
+
+def convert_data_types(df_dict):
+    """Iterates through dataframes and converts specific columns to numeric types for calculations."""
+    numeric_cols = ["stock", "price", "reorder_level", "qty", "total", "cost", "salary", "amount"]
+    for path, df in df_dict.items():
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = safe_convert_to_numeric(df[col])
+    return df_dict
+
+data_frames = convert_data_types(data_frames)
+
+
+# ==============================================================================
+# 3. AUTHENTICATION & MAIN APPLICATION STRUCTURE
+# ==============================================================================
+
+def auth_ui():
+    """Handles the user login and registration interface."""
+    st.title(f"Welcome to {APP_SETTINGS.get('company_name', 'Pro-ERP Suite')} 🔐")
+    st.markdown("Your integrated solution for business management.")
+    
+    st.info("For first-time use or demo, use credentials: **Username:** `admin` | **Password:** `admin123`", icon="ℹ️")
+
+    login_tab, register_tab = st.tabs(["**🔑 Login**", "**📝 Register New User**"])
+
+    with login_tab:
+        with st.form("login_form"):
+            st.markdown("##### Please enter your credentials to login.")
+            username = st.text_input("Username", key="login_user", placeholder="e.g., john.doe")
+            password = st.text_input("Password", type="password", key="login_pass")
+            login_button = st.form_submit_button("Secure Login", use_container_width=True, type="primary")
+
+            if login_button:
+                users_df = data_frames[USER_FILE]
+                user_record = users_df[users_df['username'] == username]
+                
+                if not user_record.empty and verify_password(user_record.iloc[0]['password'], password):
+                    st.session_state.logged_in = True
+                    st.session_state.username = username
+                    st.session_state.role = user_record.iloc[0]['role']
+                    log_activity(username, "Login", "Successful login.")
+                    st.success(f"Login successful! Welcome, {username}.")
+                    st.rerun()
+                else:
+                    log_activity(username, "Login", "Failed login attempt.")
+                    st.error("Incorrect username or password. Please try again.")
+
+    with register_tab:
+        with st.form("register_form"):
+            st.markdown("##### Create a new user account.")
+            new_user = st.text_input("Choose a Username", key="reg_user")
+            new_pass = st.text_input("Create a Password (min. 8 characters)", type="password", key="reg_pass")
+            new_pass_confirm = st.text_input("Confirm Password", type="password", key="reg_pass_confirm")
+            register_button = st.form_submit_button("Register Account", use_container_width=True)
+
+            if register_button:
+                users_df = data_frames[USER_FILE]
+                if not all([new_user, new_pass, new_pass_confirm]):
+                    st.warning("All fields are required to register.")
+                elif new_pass != new_pass_confirm:
+                    st.error("Passwords do not match. Please re-enter.")
+                elif len(new_pass) < 8:
+                    st.warning("Password must be at least 8 characters long for security.")
+                elif new_user in users_df['username'].values:
+                    st.warning("This username is already taken. Please choose another one.")
+                else:
+                    hashed_pass = hash_password(new_pass)
+                    new_user_df = pd.DataFrame([[new_user, hashed_pass, "user"]], columns=["username", "password", "role"])
+                    data_frames[USER_FILE] = pd.concat([users_df, new_user_df], ignore_index=True)
+                    save_csv(data_frames[USER_FILE], USER_FILE)
+                    log_activity(new_user, "Registration", "New user account created.")
+                    st.success("Registration successful! You can now log in using the Login tab.")
+                    st.balloons()
+
+
+def main():
+    """The main function that orchestrates the entire application flow."""
+    # Initialize session state if not already set
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+
+    # Display login/register UI if the user is not logged in
+    if not st.session_state.logged_in:
+        auth_ui()
+    else:
+        # User is logged in, display the main ERP interface
+        
+        # --- Sidebar Navigation ---
+        # FIX: Check if logo.png exists before trying to display it.
+        if os.path.exists(LOGO_PATH):
+            # FIX: Replaced deprecated `use_column_width` with `use_container_width`.
+            st.sidebar.image(LOGO_PATH, use_container_width=True)
+        else:
+            st.sidebar.warning(f"'{LOGO_PATH}' not found. Please add a logo file to the project directory.")
+        
+        st.sidebar.title(f"Welcome, {st.session_state.username}")
+        st.sidebar.markdown(f"**Role:** `{st.session_state.role.capitalize()}`")
+        st.sidebar.markdown("---")
+
+        # Role-Based Access Control (RBAC) for navigation
+        module_access = {
+            "admin": ["📊 Dashboard", "👥 CRM", "📦 Inventory", "🛒 Sales", "📥 Purchases", 
+                      "👨‍💼 HR", "💼 Accounting", "🏦 Banking", "📝 Task Management", 
+                      "📈 Reporting", "⚙️ Settings", "🛡️ Audit Log"],
+            "user": ["📊 Dashboard", "👥 CRM", "📦 Inventory", "🛒 Sales", "📝 Task Management"]
+        }
+        user_role = st.session_state.get('role', 'user')
+        available_modules = module_access.get(user_role, [])
+        
+        # Streamlit Radio button for navigation menu
+        menu = st.sidebar.radio(
+            "Navigation Menu",
+            available_modules,
+            label_visibility="collapsed"
+        )
+        
+        st.sidebar.markdown("---")
+        # Logout button
+        if st.sidebar.button("Logout", use_container_width=True):
+            log_activity(st.session_state.username, "Logout")
+            # Clear all session state keys upon logout
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
+        # --- Module Content Display ---
+        # Dynamically call the corresponding module function based on menu selection
+        module_functions = {
+            "📊 Dashboard": dashboard_module,
+            "👥 CRM": crm_module,
+            "📦 Inventory": inventory_module,
+            "🛒 Sales": sales_module,
+            "📥 Purchases": purchase_module,
+            "👨‍💼 HR": hr_module,
+            "💼 Accounting": accounting_module,
+            "🏦 Banking": banking_module,
+            "📝 Task Management": task_management_module,
+            "📈 Reporting": reporting_module,
+            "⚙️ Settings": settings_module,
+            "🛡️ Audit Log": audit_log_module,
+        }
+        
+        if menu in module_functions:
+            module_functions[menu]()
+        else:
+            st.error("Module not found or you do not have permission to access it.")
+
+# ==============================================================================
+# 4. ERP MODULES
+# ==============================================================================
+# Each function represents a self-contained module of the ERP system.
+# They operate on the globally loaded `data_frames` dictionary.
+
+def dashboard_module():
+    """Displays the main dashboard with KPIs, charts, and recent activity."""
+    st.title(f"📊 Dashboard - {APP_SETTINGS.get('company_name', 'Pro-ERP Suite')}")
+
+    # --- Key Performance Indicators (KPIs) ---
+    st.markdown("#### At a Glance")
+    total_sales = data_frames[SALES_FILE]['total'].sum()
+    total_customers = data_frames[CUSTOMER_FILE]['customer_id'].nunique()
+    low_stock_items_df = data_frames[INVENTORY_FILE]
+    low_stock_items = low_stock_items_df[low_stock_items_df['stock'] <= low_stock_items_df['reorder_level']].shape[0]
+    open_tasks = data_frames[TASK_FILE][data_frames[TASK_FILE]['status'] != 'Completed'].shape[0]
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("💰 Total Revenue", f"{APP_SETTINGS.get('currency_symbol', '$')}{total_sales:,.2f}",
+                  delta_color="off")
+    with col2:
+        st.metric("👥 Active Customers", f"{total_customers}", delta_color="off")
+    with col3:
+        st.metric("⚠️ Low Stock Alerts", f"{low_stock_items} items", 
+                  delta_color="inverse" if low_stock_items > 0 else "normal")
+    with col4:
+        st.metric("📝 Open Tasks", f"{open_tasks}", delta_color="off")
+
+    st.markdown("---")
+
+    # --- Charts & Visualizations ---
+    chart_col, activity_col = st.columns([2, 1])
+
+    with chart_col:
+        st.markdown("#### Sales Trend (Last 30 Days)")
+        sales_df = data_frames[SALES_FILE].copy() # Use copy to avoid SettingWithCopyWarning
+        if not sales_df.empty:
+            sales_df['date_only'] = pd.to_datetime(sales_df['date']).dt.date
+            thirty_days_ago = datetime.date.today() - datetime.timedelta(days=30)
+            recent_sales = sales_df[sales_df['date_only'] >= thirty_days_ago]
+            sales_trend = recent_sales.groupby('date_only')['total'].sum().reset_index()
+            
+            trend_chart = alt.Chart(sales_trend).mark_area(
+                line={'color':'#1f77b4'},
+                color=alt.Gradient(
+                    gradient='linear',
+                    stops=[alt.GradientStop(color='white', offset=0),
+                           alt.GradientStop(color='#1f77b4', offset=1)],
+                    x1=1, x2=1, y1=1, y2=0
+                )
+            ).encode(
+                x=alt.X('date_only:T', title='Date'),
+                y=alt.Y('total:Q', title='Total Sales'),
+                tooltip=['date_only', alt.Tooltip('total:Q', format='$,.2f')]
+            ).interactive().properties(
+                height=300
+            )
+            st.altair_chart(trend_chart, use_container_width=True)
+        else:
+            st.info("No sales data available to display chart.")
+
+    with activity_col:
+        st.markdown("#### 🛡️ Recent Activity Log")
+        audit_df = data_frames[AUDIT_LOG_FILE]
+        if not audit_df.empty:
+            st.dataframe(audit_df.sort_values('timestamp', ascending=False).head(10),
+                         hide_index=True, use_container_width=True)
+        else:
+            st.info("No user activity has been logged yet.")
+
+# ... [Placeholder for the extensive code for other modules] ...
+def inventory_module():
+    st.title("📦 Inventory Management")
+    st.dataframe(data_frames[INVENTORY_FILE], use_container_width=True)
+
+def crm_module():
+    st.title("👥 Customer & Supplier CRM")
+    tab_cust, tab_supp = st.tabs(["Customers", "Suppliers"])
+    with tab_cust:
+        st.dataframe(data_frames[CUSTOMER_FILE], use_container_width=True)
+    with tab_supp:
+        st.dataframe(data_frames[SUPPLIER_FILE], use_container_width=True)
+        
+def sales_module():
+    st.title("🛒 Sales")
+    st.dataframe(data_frames[SALES_FILE], use_container_width=True)
+
+def purchase_module():
+    st.title("📥 Purchases")
+    st.dataframe(data_frames[PURCHASE_FILE], use_container_width=True)
+
+def hr_module():
+    st.title("👨‍💼 Human Resources")
+    st.dataframe(data_frames[EMPLOYEE_FILE], use_container_width=True)
+
+def accounting_module():
+    st.title("💼 Accounting")
+    st.dataframe(data_frames[ACCOUNTING_FILE], use_container_width=True)
+
+def banking_module():
+    st.title("🏦 Banking")
+    st.dataframe(data_frames[BANK_FILE], use_container_width=True)
+
+# --- FULL IMPLEMENTATION OF ADVANCED MODULES ---
+def task_management_module():
+    """A module for creating, assigning, and tracking tasks."""
+    st.title("📝 Task Management")
+    
+    tasks_df = data_frames[TASK_FILE]
+    users_df = data_frames[USER_FILE]
+    
+    tab_my_tasks, tab_all_tasks, tab_new_task = st.tabs(["My Tasks", "All Tasks (Admin)", "➕ Assign New Task"])
+
+    with tab_my_tasks:
+        my_tasks = tasks_df[tasks_df['assigned_to'] == st.session_state.username]
+        st.markdown(f"You have **{len(my_tasks[my_tasks['status'] != 'Completed'])}** open tasks.")
+        if not my_tasks.empty:
+            for index, row in my_tasks.iterrows():
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    col1.markdown(f"**{row['title']}**")
+                    col1.caption(f"Due: {row['due_date']} | Created: {row['created_date']}")
+                    
+                    status_color = {"To-Do": "grey", "In Progress": "blue", "Completed": "green"}
+                    col2.markdown(f"Status: **<span style='color:{status_color.get(row['status'], 'black')};'>{row['status']}</span>**", unsafe_allow_html=True)
+                    
+                    new_status = col3.selectbox(
+                        "Update Status",
+                        options=["To-Do", "In Progress", "Completed"],
+                        index=["To-Do", "In Progress", "Completed"].index(row['status']),
+                        key=f"status_{row['task_id']}", label_visibility="collapsed"
+                    )
+                    if new_status != row['status']:
+                        data_frames[TASK_FILE].loc[index, 'status'] = new_status
+                        save_csv(data_frames[TASK_FILE], TASK_FILE)
+                        log_activity(st.session_state.username, "Task Status Update", f"Task '{row['title']}' to '{new_status}'")
+                        st.rerun()
+        else:
+            st.info("You have no tasks assigned to you.")
+
+    with tab_all_tasks:
+        if st.session_state.role == 'admin':
+            st.markdown("### Overview of All Tasks")
+            st.dataframe(tasks_df, use_container_width=True)
+        else:
+            st.warning("Access denied. This view is for administrators only.")
+
+    with tab_new_task:
+        if st.session_state.role == 'admin':
+            with st.form("new_task_form", clear_on_submit=True):
+                st.markdown("### Assign a New Task")
+                title = st.text_input("Task Title")
+                assigned_to = st.selectbox("Assign To", options=users_df['username'].unique())
+                due_date = st.date_input("Due Date", min_value=datetime.date.today())
+                
+                if st.form_submit_button("Create Task", type="primary"):
+                    task_id = f"TSK{int(datetime.datetime.now().timestamp())}"
+                    created_date = datetime.date.today().strftime("%Y-%m-%d")
+                    new_task = pd.DataFrame(
+                        [[task_id, title, assigned_to, "To-Do", created_date, str(due_date)]],
+                        columns=tasks_df.columns
+                    )
+                    data_frames[TASK_FILE] = pd.concat([tasks_df, new_task], ignore_index=True)
+                    save_csv(data_frames[TASK_FILE], TASK_FILE)
+                    log_activity(st.session_state.username, "Task Creation", f"Assigned '{title}' to {assigned_to}")
+                    st.success(f"Task '{title}' assigned to {assigned_to}.")
+        else:
+             st.warning("Access denied. Only administrators can assign tasks.")
+
+def reporting_module():
+    """Module for generating advanced reports and analytics."""
+    st.title("📈 Reporting & Analytics")
+    
+    st.markdown("Generate comprehensive reports for business insights.")
+
+    report_type = st.selectbox("Select Report Type", ["Financial Summary PDF", "Sales Deep Dive"])
+    
+    if report_type == "Financial Summary PDF":
+        if st.button("Generate Financial PDF Report", type="primary"):
+            with st.spinner("Generating your report..."):
+                pdf = FPDF()
+                pdf.add_page()
+                
+                # --- PDF Header ---
+                if os.path.exists(LOGO_PATH):
+                    pdf.image(LOGO_PATH, x=10, y=8, w=30)
+                pdf.set_font("Arial", 'B', 20)
+                pdf.cell(0, 10, APP_SETTINGS['company_name'], 0, 1, 'C')
+                pdf.set_font("Arial", '', 12)
+                pdf.cell(0, 10, f'Financial Summary Report - {datetime.date.today()}', 0, 1, 'C')
+                pdf.ln(20)
+
+                # --- Financial Summary Section ---
+                pdf.set_font('Arial', 'B', 16)
+                pdf.cell(0, 10, 'Financial Overview', 0, 1)
+                income = data_frames[ACCOUNTING_FILE][data_frames[ACCOUNTING_FILE]['type'] == 'Income']['amount'].sum()
+                expense = data_frames[ACCOUNTING_FILE][data_frames[ACCOUNTING_FILE]['type'] == 'Expense']['amount'].sum()
+                profit = income - expense
+                
+                pdf.set_font('Arial', '', 12)
+                pdf.cell(0, 8, f"Total Income: {APP_SETTINGS['currency_symbol']}{income:,.2f}", 0, 1)
+                pdf.cell(0, 8, f"Total Expenses: {APP_SETTINGS['currency_symbol']}{expense:,.2f}", 0, 1)
+                pdf.set_font('Arial', 'B', 12)
+                pdf.cell(0, 8, f"Net Profit: {APP_SETTINGS['currency_symbol']}{profit:,.2f}", 0, 1)
+                pdf.ln(10)
+
+                report_path = os.path.join(REPORTS_DIR, f"Financial_Report_{datetime.date.today()}.pdf")
+                pdf.output(report_path)
+
+            st.success("✅ Report generated successfully!")
+            with open(report_path, "rb") as pdf_file:
+                PDFbyte = pdf_file.read()
+
+            st.download_button(
+                label="📥 Download PDF Report",
+                data=PDFbyte,
+                file_name=os.path.basename(report_path),
+                mime="application/octet-stream"
+            )
+
+def settings_module():
+    """Admin-only module for managing global application settings."""
+    st.title("⚙️ Application Settings")
+    if st.session_state.role != 'admin':
+        st.error("🚫 Access Denied: You must be an administrator to view this page.")
+        return
+
+    settings = load_settings()
+
+    with st.form("settings_form"):
+        st.markdown("### General Configuration")
+        company_name = st.text_input("Company Name", value=settings.get("company_name"))
+        currency_symbol = st.text_input("Currency Symbol", value=settings.get("currency_symbol"), max_chars=5)
+        
+        st.markdown("### Module Settings")
+        low_stock_threshold = st.number_input("Low Stock Alert Threshold (Units)", min_value=0, value=settings.get("low_stock_threshold"))
+        
+        if st.form_submit_button("Save Settings", type="primary"):
+            new_settings = {
+                "company_name": company_name,
+                "currency_symbol": currency_symbol,
+                "low_stock_threshold": low_stock_threshold
+            }
+            save_settings(new_settings)
+            log_activity(st.session_state.username, "Settings Update")
+            st.success("Settings have been updated successfully.")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### ⚠️ Danger Zone")
+    with st.expander("Data Management"):
+        st.warning("These actions are irreversible and will permanently delete data.")
+        data_to_wipe = st.selectbox("Select dataset to clear", ["-Select-", "Sales", "Purchases", "All Tasks"])
+        
+        if data_to_wipe == "Sales":
+            if st.button("Wipe ALL Sales Data"):
+                data_frames[SALES_FILE] = pd.DataFrame(columns=COLUMN_DEFINITIONS[SALES_FILE])
+                save_csv(data_frames[SALES_FILE], SALES_FILE)
+                log_activity(st.session_state.username, "Data Wipe", "All sales data deleted.")
+                st.success("All sales data has been cleared.")
+                st.rerun()
+
+def audit_log_module():
+    """Displays the full audit trail for administrative review."""
+    st.title("🛡️ Audit Log Trail")
+    if st.session_state.role != 'admin':
+        st.error("🚫 Access Denied: You must be an administrator to view this page.")
+        return
+        
+    audit_df = data_frames[AUDIT_LOG_FILE]
+    st.info("This log records all significant user actions within the application.", icon="🔍")
+    
+    st.dataframe(audit_df.sort_values('timestamp', ascending=False), use_container_width=True)
+
+# ==============================================================================
+# 5. SCRIPT EXECUTION
+# ==============================================================================
+if __name__ == "__main__":
+    main()
